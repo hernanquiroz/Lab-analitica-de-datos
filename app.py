@@ -1,9 +1,12 @@
-
 import streamlit as st
 import duckdb
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import os
+import numpy as np
+import scipy.stats as stats
+import statsmodels.api as sm
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Laboratorio de Análisis", page_icon="📊", layout="wide")
@@ -51,194 +54,248 @@ st.title("📊 Laboratorio de Ciclo de Vida del Dato")
 con = get_connection()
 
 if archivo_seleccionado:
-    # Cargamos el archivo original como una vista "Bronce"
     ruta_csv = os.path.join(DATA_DIR, archivo_seleccionado)
     con.execute(f"CREATE OR REPLACE VIEW datos_raw AS SELECT * FROM read_csv_auto('{ruta_csv}')")
     
-    # Creamos las 4 pestañas del ciclo de vida
     tab1, tab2, tab3, tab4 = st.tabs([
-        "🧹 1. Limpieza y Transformación", 
-        "🔎 2. Ficha Técnica", 
-        "📈 3. Gráficos", 
-        "📥 4. Exportar Datos"
+        "🧹 1. Limpieza", "🔎 2. Ficha Técnica", "📈 3. Gráficos Estadísticos", "📥 4. Exportar"
     ])
 
     # ==========================================
-    # PESTAÑA 1: LIMPIEZA Y TRANSFORMACIÓN
+    # PESTAÑA 1: LIMPIEZA
     # ==========================================
     with tab1:
         st.subheader("Fase de Calidad y Limpieza de Datos")
-        st.info("Aplica reglas de negocio para transformar los datos crudos (Raw) en datos limpios y confiables.")
-        
-        # Obtener columnas y tipos
         info_cols = con.execute("DESCRIBE datos_raw").fetchdf()
         todas_cols = info_cols['column_name'].tolist()
         
         col1, col2 = st.columns(2)
-        
         with col1:
-            st.markdown("**1. Gestión de Duplicados y Nulos**")
             eliminar_duplicados = st.checkbox("Eliminar filas duplicadas", value=True)
-            accion_nulos = st.selectbox("Tratamiento de valores nulos (Nulos):", ["Mantener", "Eliminar filas con nulos", "Rellenar con 0 (Numéricos)", "Rellenar con 'N/A' (Texto)"])
-            
+            accion_nulos = st.selectbox("Tratamiento de nulos:", ["Mantener", "Eliminar filas", "Rellenar con 0 (Numéricos)"])
         with col2:
-            st.markdown("**2. Estandarización de Texto**")
             cols_texto = info_cols[info_cols['column_type'].str.contains('VARCHAR')]['column_name'].tolist()
-            cols_a_limpiar = st.multiselect("Columnas de texto a estandarizar (Mayúsculas y sin espacios):", cols_texto)
+            cols_a_limpiar = st.multiselect("Estandarizar texto (Mayúsculas y sin espacios):", cols_texto)
             
         st.markdown("---")
-        st.markdown("**3. Crear nueva variable (Feature Engineering)**")
-        st.markdown("Puedes crear una nueva columna basada en una operación matemática (ej. `columna_a * columna_b` o `columna_a / 100`).")
-        nueva_col_nombre = st.text_input("Nombre de la nueva columna:")
-        nueva_col_formula = st.text_input("Fórmula SQL (usa los nombres exactos de las columnas):")
+        nueva_col_nombre = st.text_input("Nueva variable (Nombre):")
+        nueva_col_formula = st.text_input("Fórmula SQL (ej. columna_a / columna_b):")
         
-        # --- EL BOTÓN MÁGICO DE LIMPIEZA ---
-        if st.button("🚀 Ejecutar Limpieza y Crear Tabla Procesada", type="primary"):
-            # Construimos la consulta SQL dinámicamente
+        if st.button("🚀 Ejecutar Limpieza", type="primary"):
             query = "SELECT "
-            
-            # Feature Engineering
             if nueva_col_nombre and nueva_col_formula:
                 query += f"({nueva_col_formula}) AS {nueva_col_nombre}, "
-                
-            # Estandarización de texto
             for c in todas_cols:
                 if c in cols_a_limpiar:
                     query += f"UPPER(TRIM({c})) AS {c}, "
                 else:
                     query += f"{c}, "
-            
             query = query.rstrip(", ") + f" FROM datos_raw"
             
-            # Duplicados
             if eliminar_duplicados:
                 query = f"SELECT DISTINCT * FROM ({query})"
                 
-            # Nulos
-            if accion_nulos == "Eliminar filas con nulos":
-                query += " WHERE 1=1 "
-                # (Nota simplificada: en producción esto requiere iterar por columna)
-            elif accion_nulos == "Rellenar con 0 (Numéricos)":
-                query = query.replace("FROM", "REPLACE (", 1) + ")" # Simulación básica para el ejemplo
-                
-            # Guardamos la tabla procesada (Capa Plata)
-            query_final = f"CREATE OR REPLACE TABLE datos_limpios AS {query}"
-            
             try:
-                con.execute(query_final)
-                st.success("¡Limpieza ejecutada con éxito! Los datos están listos en la tabla `datos_limpios`.")
+                con.execute(f"CREATE OR REPLACE TABLE datos_limpios AS {query}")
+                st.success("¡Limpieza ejecutada! Tabla 'datos_limpios' creada.")
                 st.dataframe(con.execute("SELECT * FROM datos_limpios LIMIT 5").fetchdf())
             except Exception as e:
-                st.error(f"Error en la limpieza: {e}. Verifica la fórmula SQL.")
+                st.error(f"Error: {e}")
 
     # ==========================================
     # PESTAÑA 2: FICHA TÉCNICA
     # ==========================================
     with tab2:
-        st.subheader("Perfil Estadístico (Datos Limpios)")
+        st.subheader("Perfil Estadístico")
+        tabla = "datos_limpios" if "datos_limpios" in [t[0] for t in con.execute("SHOW TABLES").fetchall()] else "datos_raw"
+        st.info(f"Mostrando ficha de: **{tabla}**")
         if st.button("Generar Ficha Técnica"):
-            # Verificamos si existe la tabla limpia, si no, usamos la raw
-            try:
-                df_summary = con.execute("SUMMARIZE datos_limpios").fetchdf()
-                st.dataframe(df_summary)
-            except:
-                st.warning("Aún no has generado la tabla limpia en la Pestaña 1. Mostrando perfil de datos RAW:")
-                st.dataframe(con.execute("SUMMARIZE datos_raw").fetchdf())
+            st.dataframe(con.execute(f"SUMMARIZE {tabla}").fetchdf())
 
     # ==========================================
-    # PESTAÑA 3: GRÁFICOS (Simplificado para el ejemplo)
+    # PESTAÑA 3: CATÁLOGO COMPLETO DE GRÁFICOS
     # ==========================================
     with tab3:
-        st.subheader("📈 Visualización Dinámica")
-        # Intentar usar datos_limpios, si no, usar datos_raw
-        tabla_a_graficar = "datos_limpios"
+        st.subheader("📈 Catálogo de Visualización Estadística")
+        
+        # Detectar tabla a usar
         try:
             con.execute("SELECT 1 FROM datos_limpios LIMIT 1")
+            tabla = "datos_limpios"
         except:
-            tabla_a_graficar = "datos_raw"
+            tabla = "datos_raw"
             
-        st.info(f"Graficando desde la tabla: **{tabla_a_graficar}**")
-        
-        info_grafico = con.execute(f"DESCRIBE {tabla_a_graficar}").fetchdf()
+        info_grafico = con.execute(f"DESCRIBE {tabla}").fetchdf()
         cols_num = info_grafico[info_grafico['column_type'].str.contains('INT|DOUBLE|FLOAT|DECIMAL')]['column_name'].tolist()
         cols_txt = info_grafico[info_grafico['column_type'].str.contains('VARCHAR')]['column_name'].tolist()
-        
-        tipo_grafico = st.selectbox("Tipo de gráfico:", ["Barras (Categórico)", "Histograma (Numérico)", "Dispersión (Relación)", "Torta (Proporción)"])
-        
-        if tipo_grafico == "Barras (Categórico)" and cols_txt:
-            var_x = st.selectbox("Variable X:", cols_txt)
-            if st.button("Graficar Barras"):
-                df = con.execute(f"SELECT {var_x}, COUNT(*) as Conteo FROM {tabla_a_graficar} GROUP BY 1").fetchdf()
-                st.plotly_chart(px.bar(df, x=var_x, y='Conteo'), use_container_width=True)
-        elif tipo_grafico == "Histograma (Numérico)" and cols_num:
-            var_y = st.selectbox("Variable Y:", cols_num)
-            if st.button("Graficar Histograma"):
-                df = con.execute(f"SELECT {var_y} FROM {tabla_a_graficar}").fetchdf()
-                st.plotly_chart(px.histogram(df, x=var_y), use_container_width=True)
-        elif tipo_grafico == "Dispersión (Relación)" and len(cols_num) >= 2:
+        cols_todas = info_grafico['column_name'].tolist()
+
+        st.markdown("### 1. Selecciona el propósito del análisis")
+        categoria = st.selectbox("Familias Estadísticas:", [
+            "1. Variables Cualitativas y Proporciones",
+            "2. Variables Cuantitativas y Distribuciones",
+            "3. Relaciones Bivariantes y Multivariantes",
+            "4. Series Temporales",
+            "5. Gráficos Especializados"
+        ])
+
+        # --- 1. CUALITATIVOS ---
+        if categoria == "1. Variables Cualitativas y Proporciones":
+            tipo = st.selectbox("Gráfico:", ["Barras", "Barras Apiladas", "Barras 100% Apiladas", "Pie / Anillo", "Treemap", "Embudo (Funnel)", "Pareto"])
+            var_x = st.selectbox("Variable Categórica Principal:", cols_txt)
+            var_color = st.selectbox("Variable de Agrupación (Opcional):", [None] + cols_txt)
+            
+            if st.button("Generar Gráfico"):
+                df = con.execute(f"SELECT {var_x} {',' + var_color if var_color else ''}, COUNT(*) as Frecuencia FROM {tabla} GROUP BY 1 {',' + var_color if var_color else ''}").fetchdf()
+                
+                if tipo == "Barras": fig = px.bar(df, x=var_x, y='Frecuencia', color=var_color)
+                elif tipo == "Barras Apiladas": fig = px.bar(df, x=var_x, y='Frecuencia', color=var_color, barmode='stack')
+                elif tipo == "Barras 100% Apiladas": fig = px.bar(df, x=var_x, y='Frecuencia', color=var_color, barmode='group', text_auto=True).update_layout(barmode='relative')
+                elif tipo == "Pie / Anillo": fig = px.pie(df, names=var_x, values='Frecuencia', hole=0.4 if "Anillo" in tipo else 0)
+                elif tipo == "Treemap": fig = px.treemap(df, path=[var_x], values='Frecuencia')
+                elif tipo == "Embudo (Funnel)": fig = px.funnel(df, x='Frecuencia', y=var_x)
+                elif tipo == "Pareto":
+                    df = df.sort_values('Frecuencia', ascending=False)
+                    df['Acumulado'] = df['Frecuencia'].cumsum() / df['Frecuencia'].sum() * 100
+                    fig = px.bar(df, x=var_x, y='Frecuencia')
+                    fig.add_scatter(x=df[var_x], y=df['Acumulado'], name='% Acumulado', yaxis='y2')
+                    fig.update_layout(yaxis2=dict(overlaying='y', side='right'))
+                st.plotly_chart(fig, use_container_width=True)
+
+        # --- 2. CUANTITATIVOS ---
+        elif categoria == "2. Variables Cuantitativas y Distribuciones":
+            tipo = st.selectbox("Gráfico:", ["Histograma", "Polígono / Ojiva", "Tallo y Hojas", "Boxplot", "Violín", "Densidad (KDE)", "Q-Q (Normalidad)", "Puntos (Dot Plot)", "Cascada"])
+            var_y = st.selectbox("Variable Numérica:", cols_num)
+            
+            if st.button("Generar Gráfico"):
+                df = con.execute(f"SELECT {var_y} FROM {tabla} WHERE {var_y} IS NOT NULL").fetchdf()
+                
+                if tipo == "Histograma": fig = px.histogram(df, x=var_y, nbins=30)
+                elif tipo == "Polígono / Ojiva":
+                    counts, bins = np.histogram(df[var_y], bins=20)
+                    mids = (bins[:-1] + bins[1:]) / 2
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=mids, y=counts, mode='lines+markers', name='Polígono'))
+                    fig.add_trace(go.Scatter(x=bins[1:], y=np.cumsum(counts), mode='lines', name='Ojiva (Acumulado)', yaxis='y2'))
+                elif tipo == "Tallo y Hojas":
+                    st.write("Representación de Tallo y Hojas (Textual):")
+                    st.text(sm.graphics.plot_stem_and_leaf(df[var_y], plot=False))
+                    fig = None
+                elif tipo == "Boxplot": fig = px.box(df, y=var_y)
+                elif tipo == "Violín": fig = px.violin(df, y=var_y, box=True)
+                elif tipo == "Densidad (KDE)": fig = px.histogram(df, x=var_y, histnorm='density').update_traces(line_shape='spline')
+                elif tipo == "Q-Q (Normalidad)":
+                    qq = sm.qqplot(df[var_y], line='45', fit=True)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=qq.gca().lines[0].get_xdata(), y=qq.gca().lines[0].get_ydata(), mode='markers', name='Datos'))
+                    fig.add_trace(go.Scatter(x=qq.gca().lines[1].get_xdata(), y=qq.gca().lines[1].get_ydata(), mode='lines', name='Ajuste Normal'))
+                elif tipo == "Puntos (Dot Plot)": fig = px.strip(df, y=var_y)
+                elif tipo == "Cascada":
+                    df_agg = df.groupby(var_y).size().reset_index(name='Frecuencia').head(10)
+                    fig = px.bar(df_agg, x=var_y, y='Frecuencia').update_traces(marker_color='blue')
+                    fig.update_layout(title="Cascada de Frecuencias (Top 10 valores)")
+                if fig: st.plotly_chart(fig, use_container_width=True)
+
+        # --- 3. RELACIONES ---
+        elif categoria == "3. Relaciones Bivariantes y Multivariantes":
+            tipo = st.selectbox("Gráfico:", ["Dispersión (Scatter)", "Burbujas", "Matriz de Dispersión", "Mapa de Calor (Correlación)", "Coordenadas Paralelas", "Radar"])
             var_x = st.selectbox("Variable X:", cols_num)
             var_y = st.selectbox("Variable Y:", cols_num)
-            if st.button("Graficar Dispersión"):
-                df = con.execute(f"SELECT {var_x}, {var_y} FROM {tabla_a_graficar}").fetchdf()
-                st.plotly_chart(px.scatter(df, x=var_x, y=var_y), use_container_width=True)
-        elif tipo_grafico == "Torta (Proporción)" and cols_txt:
-            var_x = st.selectbox("Variable:", cols_txt)
-            if st.button("Graficar Torta"):
-                df = con.execute(f"SELECT {var_x}, COUNT(*) as Conteo FROM {tabla_a_graficar} GROUP BY 1").fetchdf()
-                st.plotly_chart(px.pie(df, names=var_x, values='Conteo'), use_container_width=True)
-        else:
-            st.warning("No hay suficientes columnas del tipo requerido para este gráfico.")
+            var_color = st.selectbox("Color:", [None] + cols_txt)
+            
+            if st.button("Generar Gráfico"):
+                df = con.execute(f"SELECT * FROM {tabla} LIMIT 3000").fetchdf()
+                
+                if tipo == "Dispersión (Scatter)": fig = px.scatter(df, x=var_x, y=var_y, color=var_color)
+                elif tipo == "Burbujas": 
+                    var_size = st.selectbox("Tamaño:", cols_num)
+                    fig = px.scatter(df, x=var_x, y=var_y, size=var_size, color=var_color)
+                elif tipo == "Matriz de Dispersión": fig = px.scatter_matrix(df, dimensions=cols_num[:4], color=var_color)
+                elif tipo == "Mapa de Calor (Correlación)": fig = px.imshow(df[cols_num].corr(), text_auto=True, aspect="auto")
+                elif tipo == "Coordenadas Paralelas": fig = px.parallel_coordinates(df, color=var_color if var_color else cols_num[0])
+                elif tipo == "Radar":
+                    df_radar = df.head(5) # Solo 5 filas para no saturar
+                    fig = px.line_polar(df_radar.melt(id_vars=[var_x]), r='value', theta='variable', line_close=True)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # --- 4. SERIES TEMPORALES ---
+        elif categoria == "4. Series Temporales":
+            tipo = st.selectbox("Gráfico:", ["Líneas", "Áreas", "Autocorrelación (ACF)", "Control Estadístico (Shewhart)"])
+            var_tiempo = st.selectbox("Eje de Tiempo:", cols_todas)
+            var_y = st.selectbox("Variable a medir:", cols_num)
+            
+            if st.button("Generar Gráfico"):
+                df = con.execute(f"SELECT {var_tiempo}, {var_y} FROM {tabla} ORDER BY {var_tiempo}").fetchdf()
+                
+                if tipo == "Líneas": fig = px.line(df, x=var_tiempo, y=var_y)
+                elif tipo == "Áreas": fig = px.area(df, x=var_tiempo, y=var_y)
+                elif tipo == "Autocorrelación (ACF)":
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=sm.tsa.acf(df[var_y], nlags=40), y=range(41), mode='markers'))
+                    fig.update_layout(title="ACF (Autocorrelación)")
+                elif tipo == "Control Estadístico (Shewhart)":
+                    media = df[var_y].mean()
+                    std = df[var_y].std()
+                    fig = px.line(df, x=var_tiempo, y=var_y)
+                    fig.add_hline(y=media, line_dash="dash", line_color="green", annotation_text="Media")
+                    fig.add_hline(y=media + 3*std, line_dash="dot", line_color="red", annotation_text="LSC (+3σ)")
+                    fig.add_hline(y=media - 3*std, line_dash="dot", line_color="red", annotation_text="LIC (-3σ)")
+                st.plotly_chart(fig, use_container_width=True)
+
+        # --- 5. ESPECIALIZADOS ---
+        elif categoria == "5. Gráficos Especializados":
+            st.warning("⚠️ Nota: Gráficos como Curva ROC o Supervivencia (Kaplan-Meier) requieren una variable objetivo o de estado. Para este laboratorio, se implementan aproximaciones generales.")
+            tipo = st.selectbox("Gráfico Especializado:", ["Curva ROC (Simulada)", "Gráfico de Bosque (Forest Plot)", "Diagrama de Sankey (Flujos)"])
+            
+            if tipo == "Curva ROC (Simulada)":
+                var_y = st.selectbox("Variable numérica para umbral:", cols_num)
+                if st.button("Generar ROC"):
+                    df = con.execute(f"SELECT {var_y} FROM {tabla} WHERE {var_y} IS NOT NULL").fetchdf()
+                    # Simulamos un target binario basado en la mediana para el ejemplo
+                    y_true = (df[var_y] > df[var_y].median()).astype(int)
+                    y_scores = df[var_y]
+                    fpr, tpr, _ = sm.roc_curve(y_true, y_scores)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name='ROC Curve'))
+                    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', line_dash='dash', name='Aleatorio'))
+                    fig.update_layout(xaxis_title='False Positive Rate', yaxis_title='True Positive Rate')
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            elif tipo == "Diagrama de Sankey (Flujos)":
+                if len(cols_txt) >= 2:
+                    var_origen = st.selectbox("Origen (Categórica):", cols_txt)
+                    var_destino = st.selectbox("Destino (Categórica):", cols_txt)
+                    if st.button("Generar Sankey"):
+                        df = con.execute(f"SELECT {var_origen}, {var_destino}, COUNT(*) as value FROM {tabla} GROUP BY 1, 2").fetchdf()
+                        labels = list(pd.concat([df[var_origen], df[var_destino]]).unique())
+                        source = df[var_origen].apply(lambda x: labels.index(x)).tolist()
+                        target = df[var_destino].apply(lambda x: labels.index(x)).tolist()
+                        fig = go.Figure(data=[go.Sankey(node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=labels), link=dict(source=source, target=target, value=df['value']))])
+                        st.plotly_chart(fig, use_container_width=True)
+                else: st.error("Se necesitan al menos 2 columnas categóricas para Sankey.")
 
     # ==========================================
-    # PESTAÑA 4: EXPORTAR (El final del ciclo)
+    # PESTAÑA 4: EXPORTAR
     # ==========================================
     with tab4:
         st.subheader("📥 Descargar Datos Procesados")
-        st.markdown("""
-        Una vez que hayas aplicado la limpieza, puedes descargar el dataset resultante. 
-        El formato **CSV** es ideal para Excel, mientras que **Parquet** es el estándar para Big Data y Machine Learning.
-        """)
-        
         try:
-            # Comprobar si existe la tabla limpia
             con.execute("SELECT 1 FROM datos_limpios LIMIT 1")
-            
-            # Obtener métricas
-            total_filas = con.execute("SELECT COUNT(*) FROM datos_limpios").fetchone()[0]
-            st.success(f"✅ Tabla `datos_limpios` lista. Contiene **{total_filas} filas**.")
-            
-            # Generar archivos en memoria
+            total = con.execute("SELECT COUNT(*) FROM datos_limpios").fetchone()[0]
+            st.success(f"✅ Datos limpios disponibles: **{total} filas**.")
             df_limpio = con.execute("SELECT * FROM datos_limpios").fetchdf()
-            csv_data = df_limpio.to_csv(index=False).encode('utf-8')
-            
-            # Crear archivo Parquet (DuckDB nativo)
-            parquet_path = "data/02_processed/datos_limpios.parquet"
-            con.execute(f"COPY datos_limpios TO '{parquet_path}' (FORMAT PARQUET)")
             
             col1, col2 = st.columns(2)
             with col1:
-                st.download_button(
-                    label="📄 Descargar en CSV (Excel)",
-                    data=csv_data,
-                    file_name=f"limpio_{archivo_seleccionado}",
-                    mime="text/csv",
-                    type="primary"
-                )
+                st.download_button("📄 Descargar CSV", df_limpio.to_csv(index=False).encode('utf-8'), f"limpio_{archivo_seleccionado}", "text/csv", type="primary")
             with col2:
+                parquet_path = "data/02_processed/datos_limpios.parquet"
+                con.execute(f"COPY datos_limpios TO '{parquet_path}' (FORMAT PARQUET)")
                 with open(parquet_path, "rb") as f:
-                    st.download_button(
-                        label="⚡ Descargar en Parquet (Big Data)",
-                        data=f,
-                        file_name="datos_limpios.parquet",
-                        mime="application/octet-stream"
-                    )
-            
-            st.markdown("### Vista previa de los datos finales:")
-            st.dataframe(df_limpio.head(50))
-            
-        except Exception:
-            st.warning("⚠️ Aún no has generado la tabla limpia. Ve a la pestaña 1 y ejecuta el proceso de limpieza primero.")
+                    st.download_button("⚡ Descargar Parquet", f, "datos_limpios.parquet", "application/octet-stream")
+        except:
+            st.warning("⚠️ Aún no has ejecutado la limpieza en la Pestaña 1.")
             
     con.close()
 else:
-    st.info("👈 Sube un archivo CSV o selecciona uno de la lista para iniciar el ciclo de vida del dato.")
+    st.info("👈 Sube un archivo CSV o selecciona uno de la lista para iniciar.")
